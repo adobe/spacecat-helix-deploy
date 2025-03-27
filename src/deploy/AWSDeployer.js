@@ -836,6 +836,7 @@ export default class AWSDeployer extends BaseDeployer {
 
   async updateLinks() {
     const { cfg, functionName } = this;
+    const { ApiId } = await this.initApiId();
     const functionVersion = cfg.version.replace(/\./g, '_');
 
     let res;
@@ -863,7 +864,43 @@ export default class AWSDeployer extends BaseDeployer {
 
     for (const suffix of sfx) {
       // create or update alias
-      await this.createOrUpdateAlias(suffix.replace('.', '_'), functionName, incrementalVersion);
+      const aliasArn = await this.createOrUpdateAlias(suffix.replace('.', '_'), functionName, incrementalVersion);
+
+      // find or create integration
+      let integration = await this.findIntegration(ApiId, aliasArn);
+      if (integration) {
+        this.log.info(`--: using existing integration "${integration.IntegrationId}" for "${aliasArn}"`);
+      } else {
+        integration = await this._api.send(new CreateIntegrationCommand({
+          ApiId,
+          IntegrationMethod: 'POST',
+          IntegrationType: 'AWS_PROXY',
+          IntegrationUri: aliasArn,
+          PayloadFormatVersion: '2.0',
+          TimeoutInMillis: Math.min(cfg.timeout, 30000),
+        }));
+        this.log.info(chalk`{green ok:} created new integration "${integration.IntegrationId}" for "${aliasArn}"`);
+      }
+      const { IntegrationId } = integration;
+
+      const routeParams = {
+        ApiId,
+        Target: `integrations/${IntegrationId}`,
+        AuthorizerId: undefined,
+        AuthorizationType: 'NONE',
+      };
+      if (this._cfg.attachAuthorizer) {
+        this.log.info(chalk`--: fetching authorizers...`);
+        const authorizers = await this.fetchAuthorizers(ApiId);
+        const authorizer = authorizers.find((info) => info.Name === this._cfg.attachAuthorizer);
+        if (!authorizer) {
+          throw Error(`Specified authorizer ${this._cfg.attachAuthorizer} does not exist in api ${ApiId}.`);
+        }
+        routeParams.AuthorizerId = authorizer.AuthorizerId;
+        routeParams.AuthorizationType = 'CUSTOM';
+        this.log.info(chalk`{green ok:} configuring routes with authorizer {blue ${this._cfg.attachAuthorizer}} {yellow ${authorizer.AuthorizerId}}`);
+      }
+
     }
   }
 
